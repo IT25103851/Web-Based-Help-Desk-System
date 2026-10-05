@@ -1,0 +1,128 @@
+package com.university.helpdesk.service;
+
+import com.university.helpdesk.model.PasswordResetToken;
+import com.university.helpdesk.model.User;
+import com.university.helpdesk.repository.PasswordResetTokenRepository;
+import com.university.helpdesk.repository.UserRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.time.LocalDateTime;
+import java.util.Base64;
+import java.util.HexFormat;
+import java.util.List;
+
+@Service
+public class PasswordResetService {
+
+    private static final Logger log = LoggerFactory.getLogger(PasswordResetService.class);
+
+    private final UserRepository userRepository;
+    private final PasswordResetTokenRepository tokenRepository;
+    private final PasswordEncoder passwordEncoder;
+    private final EmailService emailService;
+    private final SecureRandom secureRandom = new SecureRandom();
+
+    @Value("${app.password-reset-token-expiration-minutes:15}")
+    private long expirationMinutes;
+
+    @Value("${app.password-reset.self-service:true}")
+    private boolean selfServiceEnabled;
+
+    @Value("${app.frontend.url:http://localhost:5173}")
+    private String frontendUrl;
+
+    public PasswordResetService(UserRepository userRepository,
+                                PasswordResetTokenRepository tokenRepository,
+                                PasswordEncoder passwordEncoder,
+                                EmailService emailService) {
+        this.userRepository = userRepository;
+        this.tokenRepository = tokenRepository;
+        this.passwordEncoder = passwordEncoder;
+        this.emailService = emailService;
+    }
+
+    @Transactional
+    public void requestReset(String email) {
+        userRepository.findByEmailIgnoreCase(email.trim())
+                .filter(user -> "ACTIVE".equalsIgnoreCase(user.getStatus()))
+                .ifPresent(user -> {
+            LocalDateTime now = LocalDateTime.now();
+            tokenRepository.findByUserAndUsedAtIsNull(user).forEach(token -> token.setUsedAt(now));
+
+            PasswordResetToken token = new PasswordResetToken();
+            token.setUser(user);
+
+            if (selfServiceEnabled) {
+                byte[] randomBytes = new byte[32];
+                secureRandom.nextBytes(randomBytes);
+                String rawToken = Base64.getUrlEncoder().withoutPadding().encodeToString(randomBytes);
+                LocalDateTime expiresAt = now.plusMinutes(expirationMinutes);
+
+                token.setTokenHash(hashToken(rawToken));
+                token.setIssuedAt(now);
+                token.setExpiresAt(expiresAt);
+                tokenRepository.save(token);
+
+                String resetLink = frontendUrl + "/password-reset?token=" + rawToken;
+                String subject = "UniAssist 360 - Password Reset Request";
+                String body = "Hello " + (user.getFullName() != null ? user.getFullName() : user.getUsername()) + ",\n\n"
+                        + "A password reset request was received for your UniAssist 360 account.\n\n"
+                        + "Click the link below to set a new password:\n"
+                        + resetLink + "\n\n"
+                        + "This link will expire in " + expirationMinutes + " minutes.\n"
+                        + "If you did not request this, please ignore this email.";
+                boolean sent = emailService.sendEmail(user.getEmail(), subject, body);
+                if (!sent) {
+                    log.warn("Password reset email delivery failed or was disabled for user id={}. Invalidating generated token.", user.getId());
+                    token.setUsedAt(now);
+                    token.setExpiresAt(now);
+                    tokenRepository.save(token);
+                }
+            } else {
+                tokenRepository.save(token);
+            }
+        });
+    }
+
+    @Transactional
+    public void resetPassword(String rawToken, String newPassword) {
+        PasswordResetToken token = tokenRepository.findActiveByTokenHashForUpdate(hashToken(rawToken.trim()))
+                .orElseThrow(() -> invalidToken());
+
+        LocalDateTime now = LocalDateTime.now();
+        if (token.getExpiresAt() == null || token.getExpiresAt().isBefore(now)) {
+            throw invalidToken();
+        }
+
+        User user = token.getUser();
+        user.setPassword(passwordEncoder.encode(newPassword));
+        user.setTokenVersion(user.getTokenVersion() + 1);
+        tokenRepository.findByUserAndUsedAtIsNull(user).forEach(activeToken -> activeToken.setUsedAt(now));
+        userRepository.save(user);
+    }
+
+    private ResponseStatusException invalidToken() {
+        return new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid or expired password reset token");
+    }
+
+    private String hashToken(String rawToken) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(rawToken.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is not available", e);
+        }
+    }
+}
