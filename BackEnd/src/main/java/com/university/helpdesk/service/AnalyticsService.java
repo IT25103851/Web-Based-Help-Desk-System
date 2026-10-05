@@ -62,6 +62,7 @@ public class AnalyticsService {
         };
     }
 
+
     public void setSlaThresholdLow(long slaThresholdLow) { this.slaThresholdLow = slaThresholdLow; }
     public void setSlaThresholdMedium(long slaThresholdMedium) { this.slaThresholdMedium = slaThresholdMedium; }
     public void setSlaThresholdHigh(long slaThresholdHigh) { this.slaThresholdHigh = slaThresholdHigh; }
@@ -100,6 +101,7 @@ public class AnalyticsService {
                     .sum();
             avgResolutionHours = Math.round((totalMinutes / 60.0 / resolvedList.size()) * 10.0) / 10.0;
         }
+
 
         // CSAT: avgRating = arithmetic average out of 5; csatScore = % of ratings >= 4
         double avgCsatRating = 0.0;
@@ -156,17 +158,21 @@ public class AnalyticsService {
         List<Ticket> allTickets = ticketRepository.findAll();
         List<Feedback> allFeedbacks = feedbackRepository.findAll();
 
+        //creates an empty list that will eventually contain the performance information for every agent
         List<Map<String, Object>> result = new ArrayList<>();
 
+        //Take each support agent from the agents list and process them one by one
         for (User agent : agents) {
             List<Ticket> assigned = allTickets.stream()
                     .filter(t -> t.getAssignedTo() != null && Objects.equals(t.getAssignedTo().getId(), agent.getId()))
                     .toList();
 
+            //How many of this agent's tickets have been completed
             long resolvedCount = assigned.stream()
                     .filter(t -> t.getStatus() == Status.RESOLVED || t.getStatus() == Status.CLOSED)
                     .count();
 
+            //Get the IDs of assigned tickets
             Set<Long> assignedTicketIds = assigned.stream().map(Ticket::getId).collect(Collectors.toSet());
             List<Feedback> agentFeedbacks = allFeedbacks.stream()
                     .filter(f -> f.getTicket() != null && assignedTicketIds.contains(f.getTicket().getId()))
@@ -197,99 +203,17 @@ public class AnalyticsService {
         return result;
     }
 
-    // ─── SLA COMPLIANCE ──────────────────────────────────────────────────────
-    public Map<String, Object> getSlaCompliance() {
-        List<Ticket> allTickets = ticketRepository.findAll();
 
-        long totalMeasuredTickets = 0;
-        long slaMetCount = 0;
-        long slaBreachedCount = 0;
-
-        Map<Priority, Long> priorityTotals = new EnumMap<>(Priority.class);
-        Map<Priority, Long> priorityMets = new EnumMap<>(Priority.class);
-        Map<Priority, Long> priorityBreached = new EnumMap<>(Priority.class);
-
-        for (Priority p : Priority.values()) {
-            priorityTotals.put(p, 0L);
-            priorityMets.put(p, 0L);
-            priorityBreached.put(p, 0L);
-        }
-
-        LocalDateTime now = LocalDateTime.now();
-
-        for (Ticket ticket : allTickets) {
-            Status status = ticket.getStatus();
-            if (status == Status.CANCELLED || status == Status.REJECTED) {
-                continue;
-            }
-
-            Priority priority = ticket.getPriority() != null ? ticket.getPriority() : Priority.MEDIUM;
-            long thresholdHours = getThresholdHours(priority);
-            long thresholdMinutes = thresholdHours * 60;
-
-            LocalDateTime createdAt = ticket.getCreatedAt() != null ? ticket.getCreatedAt() : now;
-
-            boolean isMet;
-            if (status == Status.RESOLVED || status == Status.CLOSED) {
-                LocalDateTime resolvedAt = ticket.getResolvedAt() != null ? ticket.getResolvedAt() :
-                        (ticket.getUpdatedAt() != null ? ticket.getUpdatedAt() : now);
-                long elapsedMinutes = Math.max(0, Duration.between(createdAt, resolvedAt).toMinutes());
-                isMet = elapsedMinutes <= thresholdMinutes;
-            } else {
-                long elapsedMinutes = Math.max(0, Duration.between(createdAt, now).toMinutes());
-                isMet = elapsedMinutes <= thresholdMinutes;
-            }
-
-            totalMeasuredTickets++;
-            priorityTotals.put(priority, priorityTotals.get(priority) + 1);
-
-            if (isMet) {
-                slaMetCount++;
-                priorityMets.put(priority, priorityMets.get(priority) + 1);
-            } else {
-                slaBreachedCount++;
-                priorityBreached.put(priority, priorityBreached.get(priority) + 1);
-            }
-        }
-
-        Map<String, Object> perPriority = new LinkedHashMap<>();
-        for (Priority p : Priority.values()) {
-            long pTotal = priorityTotals.get(p);
-            long pMet = priorityMets.get(p);
-            long pBreached = priorityBreached.get(p);
-            double pCompliance = pTotal == 0 ? 0.0 : Math.round(((double) pMet / pTotal) * 1000.0) / 10.0;
-
-            Map<String, Object> item = new LinkedHashMap<>();
-            item.put("thresholdHours", getThresholdHours(p));
-            item.put("total", pTotal);
-            item.put("met", pMet);
-            item.put("breached", pBreached);
-            item.put("compliancePercentage", pCompliance);
-
-            perPriority.put(p.name(), item);
-        }
-
-        double compliancePercentage = totalMeasuredTickets == 0 ? 0.0 :
-                Math.round(((double) slaMetCount / totalMeasuredTickets) * 1000.0) / 10.0;
-
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("totalMeasuredTickets", totalMeasuredTickets);
-        result.put("slaMetCount", slaMetCount);
-        result.put("slaBreachedCount", slaBreachedCount);
-        result.put("compliancePercentage", compliancePercentage);
-        result.put("perPriority", perPriority);
-
-        return result;
-    }
 
     // ─── CSV REPORT GENERATION ───────────────────────────────────────────────
     public String generateCsvReport() {
         List<Ticket> tickets = ticketRepository.findAll();
         StringBuilder csv = new StringBuilder();
 
-        // CSV Header
+        //Creates CSV column headings
         csv.append("Ticket Number,Title,Category,Priority,Status,Location,Department,Created By,Assigned To,Created At,Resolved At,Resolution Notes\n");
 
+        //Controls how dates appear in the CSV
         DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
         for (Ticket t : tickets) {
@@ -310,7 +234,7 @@ public class AnalyticsService {
         // Operational Agent Activity Logs Section
         csv.append("\n\n--- OPERATIONAL AGENT ACTIVITY LOGS ---\n");
         csv.append("Timestamp,Actor,Role,Department,Action,Ticket Number,Details\n");
-        List<AgentActivityLog> logs = agentActivityLogRepository.findAllByOrderByCreatedAtDesc();
+        List<AgentActivityLog> logs = agentActivityLogRepository.findAllByOrderByCreatedAtDesc(); //Retrieve all agent activity logs and order them from newest to oldest.
         for (AgentActivityLog log : logs) {
             csv.append(escapeCsv(log.getCreatedAt() != null ? log.getCreatedAt().format(fmt) : "")).append(",");
             csv.append(escapeCsv(log.getActorName())).append(",");
@@ -335,7 +259,7 @@ public class AnalyticsService {
             csv.append(escapeCsv(in.getUpdatedAt() != null ? in.getUpdatedAt().format(fmt) : "")).append("\n");
         }
 
-        return csv.toString();
+        return csv.toString(); //The entire StringBuilder is converted into a normal String and returned.
     }
 
     private String escapeCsv(String value) {
