@@ -95,33 +95,21 @@ export default function AnalyticsDashboard() {
         axios.get(`${API}/analytics/summary`),
         axios.get(`${API}/analytics/agent-performance`),
       ];
-      if (canViewSla) {
-        requests.push(axios.get(`${API}/analytics/sla-compliance`));
-      }
       if (canViewExecutiveAnalytics) {
-        requests.push(axios.get(`${API}/analytics/activity-summary`));
-        requests.push(axios.get(`${API}/analytics/activity-logs`));
         requests.push(axios.get(`${API}/analytics/insights`));
       }
       const results = await Promise.all(requests);
       setSummary(results[0].data);
       setAgentPerformance(results[1].data);
-      let idx = 2;
-      if (canViewSla) {
-        setSlaCompliance(results[idx]?.data);
-        idx++;
-      }
       if (canViewExecutiveAnalytics) {
-        setActivitySummary(results[idx]?.data);
-        setActivityLogs(results[idx + 1]?.data || []);
-        setInsights(results[idx + 2]?.data || []);
+        setInsights(results[2]?.data || []);
       }
     } catch {
       showToast('Failed to load analytics data.', 'error');
     } finally {
       setLoading(false);
     }
-  }, [canViewSla, canViewExecutiveAnalytics, showToast]);
+  }, [canViewExecutiveAnalytics, showToast]);
 
   useEffect(() => {
     fetchAnalyticsData();
