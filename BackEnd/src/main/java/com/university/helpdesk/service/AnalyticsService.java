@@ -1,0 +1,270 @@
+package com.university.helpdesk.service;
+
+import com.university.helpdesk.model.*;
+import com.university.helpdesk.repository.AgentActivityLogRepository;
+import com.university.helpdesk.repository.AnalyticsInsightRepository;
+import com.university.helpdesk.repository.FeedbackRepository;
+import com.university.helpdesk.repository.TicketRepository;
+import com.university.helpdesk.repository.UserRepository;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+import java.time.Duration;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+import java.util.stream.Collectors;
+
+@Service
+public class AnalyticsService {
+
+    private final TicketRepository ticketRepository;
+    private final FeedbackRepository feedbackRepository;
+    private final UserRepository userRepository;
+    private final AgentActivityLogRepository agentActivityLogRepository;
+    private final AnalyticsInsightRepository analyticsInsightRepository;
+
+    @Value("${app.sla.threshold.low:72}")
+    private long slaThresholdLow = 72;
+
+    @Value("${app.sla.threshold.medium:48}")
+    private long slaThresholdMedium = 48;
+
+    @Value("${app.sla.threshold.high:24}")
+    private long slaThresholdHigh = 24;
+
+    @Value("${app.sla.threshold.urgent:8}")
+    private long slaThresholdUrgent = 8;
+
+    @Value("${app.sla.threshold.critical:4}")
+    private long slaThresholdCritical = 4;
+
+    public AnalyticsService(TicketRepository ticketRepository,
+                            FeedbackRepository feedbackRepository,
+                            UserRepository userRepository,
+                            AgentActivityLogRepository agentActivityLogRepository,
+                            AnalyticsInsightRepository analyticsInsightRepository) {
+        this.ticketRepository = ticketRepository;
+        this.feedbackRepository = feedbackRepository;
+        this.userRepository = userRepository;
+        this.agentActivityLogRepository = agentActivityLogRepository;
+        this.analyticsInsightRepository = analyticsInsightRepository;
+    }
+
+    public long getThresholdHours(Priority priority) {
+        if (priority == null) return slaThresholdMedium;
+        return switch (priority) {
+            case LOW -> slaThresholdLow;
+            case MEDIUM -> slaThresholdMedium;
+            case HIGH -> slaThresholdHigh;
+            case URGENT -> slaThresholdUrgent;
+            case CRITICAL -> slaThresholdCritical;
+        };
+    }
+
+
+    public void setSlaThresholdLow(long slaThresholdLow) { this.slaThresholdLow = slaThresholdLow; }
+    public void setSlaThresholdMedium(long slaThresholdMedium) { this.slaThresholdMedium = slaThresholdMedium; }
+    public void setSlaThresholdHigh(long slaThresholdHigh) { this.slaThresholdHigh = slaThresholdHigh; }
+    public void setSlaThresholdUrgent(long slaThresholdUrgent) { this.slaThresholdUrgent = slaThresholdUrgent; }
+    public void setSlaThresholdCritical(long slaThresholdCritical) { this.slaThresholdCritical = slaThresholdCritical; }
+
+
+    // ─── SUMMARY METRICS ─────────────────────────────────────────────────────
+    public Map<String, Object> getSummary() {
+        List<Ticket> tickets = ticketRepository.findAll();
+        List<Feedback> feedbacks = feedbackRepository.findAll();
+
+        long totalTickets = tickets.size();
+
+        long openTickets = tickets.stream()
+                .filter(t -> t.getStatus() == Status.OPEN)
+                .count();
+
+        long inProgressTickets = tickets.stream()
+                .filter(t -> t.getStatus() == Status.IN_PROGRESS || t.getStatus() == Status.REOPENED)
+                .count();
+
+        long resolvedTickets = tickets.stream()
+                .filter(t -> t.getStatus() == Status.RESOLVED || t.getStatus() == Status.CLOSED)
+                .count();
+
+        // Calculate average resolution time in hours
+        double avgResolutionHours = 0.0;
+        List<Ticket> resolvedList = tickets.stream()
+                .filter(t -> (t.getStatus() == Status.RESOLVED || t.getStatus() == Status.CLOSED) && t.getResolvedAt() != null && t.getCreatedAt() != null)
+                .toList();
+
+        if (!resolvedList.isEmpty()) {
+            long totalMinutes = resolvedList.stream()
+                    .mapToLong(t -> Math.max(0, Duration.between(t.getCreatedAt(), t.getResolvedAt()).toMinutes()))
+                    .sum();
+            avgResolutionHours = Math.round((totalMinutes / 60.0 / resolvedList.size()) * 10.0) / 10.0;
+        }
+
+
+        // CSAT: avgRating = arithmetic average out of 5; csatScore = % of ratings >= 4
+        double avgCsatRating = 0.0;
+        double satisfactionRatePercentage = 0.0;
+
+        if (!feedbacks.isEmpty()) {
+            double totalRating = feedbacks.stream().mapToInt(Feedback::getRating).sum();
+            avgCsatRating = Math.round((totalRating / feedbacks.size()) * 10.0) / 10.0;
+            long satisfiedCount = feedbacks.stream().filter(f -> f.getRating() >= 4).count();
+            satisfactionRatePercentage = Math.round(((double) satisfiedCount / feedbacks.size()) * 100.0);
+        }
+
+        // Category distribution
+        Map<String, Long> categoryDistribution = tickets.stream()
+                .collect(Collectors.groupingBy(
+                        t -> (t.getCategory() != null ? t.getCategory().getName() : (t.getDepartment() != null ? t.getDepartment() : "General IT")),
+                        Collectors.counting()
+                ));
+
+        // Priority distribution
+        Map<String, Long> priorityDistribution = tickets.stream()
+                .collect(Collectors.groupingBy(
+                        t -> t.getPriority() != null ? t.getPriority().name() : "MEDIUM",
+                        Collectors.counting()
+                ));
+
+        // Status distribution
+        Map<String, Long> statusDistribution = tickets.stream()
+                .collect(Collectors.groupingBy(
+                        t -> t.getStatus() != null ? t.getStatus().name() : "OPEN",
+                        Collectors.counting()
+                ));
+
+        Map<String, Object> summary = new HashMap<>();
+        summary.put("totalTickets", totalTickets);
+        summary.put("openTickets", openTickets);
+        summary.put("inProgressTickets", inProgressTickets);
+        summary.put("resolvedTickets", resolvedTickets);
+        summary.put("avgResolutionTimeHours", avgResolutionHours);
+        summary.put("avgCsatRating", avgCsatRating);
+        summary.put("satisfactionRatePercentage", satisfactionRatePercentage);
+        summary.put("totalFeedbackCount", feedbacks.size());
+        summary.put("categoryDistribution", categoryDistribution);
+        summary.put("priorityDistribution", priorityDistribution);
+        summary.put("statusDistribution", statusDistribution);
+
+        return summary;
+    }
+
+    // ─── AGENT PERFORMANCE ──────────────────────────────────────────────────
+    public List<Map<String, Object>> getAgentPerformance() {
+        List<User> agents = userRepository.findByRole(Role.SUPPORT_AGENT);
+
+        List<Ticket> allTickets = ticketRepository.findAll();
+        List<Feedback> allFeedbacks = feedbackRepository.findAll();
+
+        //creates an empty list that will eventually contain the performance information for every agent
+        List<Map<String, Object>> result = new ArrayList<>();
+
+        //Take each support agent from the agents list and process them one by one
+        for (User agent : agents) {
+            List<Ticket> assigned = allTickets.stream()
+                    .filter(t -> t.getAssignedTo() != null && Objects.equals(t.getAssignedTo().getId(), agent.getId()))
+                    .toList();
+
+            //How many of this agent's tickets have been completed
+            long resolvedCount = assigned.stream()
+                    .filter(t -> t.getStatus() == Status.RESOLVED || t.getStatus() == Status.CLOSED)
+                    .count();
+
+            //Get the IDs of assigned tickets
+            Set<Long> assignedTicketIds = assigned.stream().map(Ticket::getId).collect(Collectors.toSet());
+            List<Feedback> agentFeedbacks = allFeedbacks.stream()
+                    .filter(f -> f.getTicket() != null && assignedTicketIds.contains(f.getTicket().getId()))
+                    .toList();
+
+            double avgRating = 0.0;
+            if (!agentFeedbacks.isEmpty()) {
+                double sum = agentFeedbacks.stream().mapToInt(Feedback::getRating).sum();
+                avgRating = Math.round((sum / agentFeedbacks.size()) * 10.0) / 10.0;
+            }
+
+            Map<String, Object> item = new HashMap<>();
+            item.put("agentId", agent.getId());
+            item.put("agentName", agent.getFullName() != null ? agent.getFullName() : agent.getUsername());
+            item.put("email", agent.getEmail());
+            item.put("department", agent.getDepartment() != null ? agent.getDepartment() : "IT Support");
+            item.put("role", agent.getRole().name());
+            item.put("assignedTicketsCount", assigned.size());
+            item.put("resolvedTicketsCount", resolvedCount);
+            item.put("avgCsatRating", avgRating);
+            item.put("feedbackCount", agentFeedbacks.size());
+
+            result.add(item);
+        }
+
+        // Sort by resolved tickets count descending
+        result.sort((a, b) -> Long.compare((Long) b.get("resolvedTicketsCount"), (Long) a.get("resolvedTicketsCount")));
+        return result;
+    }
+
+
+
+    // ─── CSV REPORT GENERATION ───────────────────────────────────────────────
+    public String generateCsvReport() {
+        List<Ticket> tickets = ticketRepository.findAll();
+        StringBuilder csv = new StringBuilder();
+
+        //Creates CSV column headings
+        csv.append("Ticket Number,Title,Category,Priority,Status,Location,Department,Created By,Assigned To,Created At,Resolved At,Resolution Notes\n");
+
+        //Controls how dates appear in the CSV
+        DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+
+        for (Ticket t : tickets) {
+            csv.append(escapeCsv(t.getTicketNumber())).append(",");
+            csv.append(escapeCsv(t.getTitle())).append(",");
+            csv.append(escapeCsv(t.getCategory() != null ? t.getCategory().getName() : "General")).append(",");
+            csv.append(escapeCsv(t.getPriority() != null ? t.getPriority().name() : "MEDIUM")).append(",");
+            csv.append(escapeCsv(t.getStatus() != null ? t.getStatus().name() : "OPEN")).append(",");
+            csv.append(escapeCsv(t.getLocation())).append(",");
+            csv.append(escapeCsv(t.getDepartment())).append(",");
+            csv.append(escapeCsv(t.getCreatedBy() != null ? t.getCreatedBy().getFullName() : "N/A")).append(",");
+            csv.append(escapeCsv(t.getAssignedTo() != null ? t.getAssignedTo().getFullName() : "Unassigned")).append(",");
+            csv.append(escapeCsv(t.getCreatedAt() != null ? t.getCreatedAt().format(fmt) : "")).append(",");
+            csv.append(escapeCsv(t.getResolvedAt() != null ? t.getResolvedAt().format(fmt) : "")).append(",");
+            csv.append(escapeCsv(t.getResolutionNotes())).append("\n");
+        }
+
+        // Operational Agent Activity Logs Section
+        csv.append("\n\n--- OPERATIONAL AGENT ACTIVITY LOGS ---\n");
+        csv.append("Timestamp,Actor,Role,Department,Action,Ticket Number,Details\n");
+        List<AgentActivityLog> logs = agentActivityLogRepository.findAllByOrderByCreatedAtDesc(); //Retrieve all agent activity logs and order them from newest to oldest.
+        for (AgentActivityLog log : logs) {
+            csv.append(escapeCsv(log.getCreatedAt() != null ? log.getCreatedAt().format(fmt) : "")).append(",");
+            csv.append(escapeCsv(log.getActorName())).append(",");
+            csv.append(escapeCsv(log.getActorRole() != null ? log.getActorRole().name() : "")).append(",");
+            csv.append(escapeCsv(log.getActorDepartment())).append(",");
+            csv.append(escapeCsv(log.getAction() != null ? log.getAction().name() : "")).append(",");
+            csv.append(escapeCsv(log.getTicket() != null ? log.getTicket().getTicketNumber() : "")).append(",");
+            csv.append(escapeCsv(log.getDetails())).append("\n");
+        }
+
+        // Management Analytics Insights Section
+        csv.append("\n\n--- MANAGEMENT ANALYTICS INSIGHTS ---\n");
+        csv.append("Timestamp,Author,Role,Department,Title,Content,Last Updated\n");
+        List<AnalyticsInsight> insights = analyticsInsightRepository.findAllByOrderByCreatedAtDesc();
+        for (AnalyticsInsight in : insights) {
+            csv.append(escapeCsv(in.getCreatedAt() != null ? in.getCreatedAt().format(fmt) : "")).append(",");
+            csv.append(escapeCsv(in.getAuthorName())).append(",");
+            csv.append(escapeCsv(in.getAuthorRole() != null ? in.getAuthorRole().name() : "")).append(",");
+            csv.append(escapeCsv(in.getDepartment())).append(",");
+            csv.append(escapeCsv(in.getTitle())).append(",");
+            csv.append(escapeCsv(in.getContent())).append(",");
+            csv.append(escapeCsv(in.getUpdatedAt() != null ? in.getUpdatedAt().format(fmt) : "")).append("\n");
+        }
+
+        return csv.toString(); //The entire StringBuilder is converted into a normal String and returned.
+    }
+
+    private String escapeCsv(String value) {
+        if (value == null) return "\"\"";
+        String escaped = value.replace("\"", "\"\"");
+        return "\"" + escaped + "\"";
+    }
+}
